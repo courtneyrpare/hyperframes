@@ -17,7 +17,10 @@ import { mergeTokensToWords } from "./lib/parakeet-words.mjs";
 import { track } from "./lib/telemetry.mjs";
 import { resolveNpxInvocation } from "./lib/npx-sync.mjs";
 
-// The DEFAULT local transcription path. Prefers NVIDIA Parakeet-TDT via
+// When ELEVENLABS_API_KEY is set, `auto` uses ElevenLabs Scribe (cloud speech-
+// to-text, 99 languages, native word timestamps) ahead of the local engines.
+//
+// Otherwise this is the DEFAULT local transcription path. Prefers NVIDIA Parakeet-TDT via
 // parakeet-mlx, which beats whisper.cpp on the Open ASR Leaderboard (~6.05% vs
 // 7.44% avg WER, and 4.73% vs 5.96% on noisy test-other) and is 5-10x faster
 // with native punctuation. Emits { text, words:[{text,start,end}] } (word
@@ -33,8 +36,9 @@ const { values: args } = parseArgs({
   options: {
     input: { type: "string", short: "i" },
     out: { type: "string", short: "o" },
-    engine: { type: "string", default: "auto" }, // auto | parakeet | whisper
+    engine: { type: "string", default: "auto" }, // auto | elevenlabs | parakeet | whisper
     model: { type: "string", default: "mlx-community/parakeet-tdt-0.6b-v3" },
+    language: { type: "string", short: "l" },
     json: { type: "boolean", default: false },
     help: { type: "boolean", short: "h", default: false },
   },
@@ -42,12 +46,14 @@ const { values: args } = parseArgs({
 });
 
 if (args.help) {
-  console.log(`media-use transcribe: better-than-whisper local ASR (Parakeet), whisper.cpp fallback
+  console.log(`media-use transcribe: ElevenLabs Scribe (when ELEVENLABS_API_KEY is set), else local Parakeet, whisper.cpp fallback
 
 Usage:
-  node transcribe.mjs --input audio.wav [--out audio.transcribe.json] [--engine auto|parakeet|whisper]
+  node transcribe.mjs --input audio.wav [--out audio.transcribe.json] [--engine auto|elevenlabs|parakeet|whisper] [--language en]
 
-Parakeet (default) beats whisper.cpp on accuracy + speed for English/European
+ElevenLabs is the default whenever ELEVENLABS_API_KEY is set (model: scribe_v1,
+override with HYPERFRAMES_ELEVENLABS_STT_MODEL); the file is uploaded to the
+ElevenLabs API. Without a key, Parakeet beats whisper.cpp on accuracy + speed for English/European
 languages; whisper.cpp (99 languages) is the fallback. Install Parakeet once:
   uv venv ~/.venvs/parakeet && VIRTUAL_ENV=~/.venvs/parakeet uv pip install parakeet-mlx`);
   process.exit(0);
@@ -122,6 +128,33 @@ function runParakeet(runner) {
   }
 }
 
+// ElevenLabs Scribe speech-to-text. Keeps only `type: "word"` entries (Scribe
+// interleaves `spacing` and `audio_event` entries) in the { text, words } shape.
+async function runElevenLabs() {
+  const apiKey = process.env.ELEVENLABS_API_KEY?.trim();
+  if (!apiKey) throw new Error("ELEVENLABS_API_KEY is not set (or use --engine parakeet|whisper)");
+  const form = new FormData();
+  form.append("model_id", process.env.HYPERFRAMES_ELEVENLABS_STT_MODEL || "scribe_v1");
+  form.append("timestamps_granularity", "word");
+  form.append("tag_audio_events", "false");
+  if (args.language) form.append("language_code", args.language);
+  form.append("file", new Blob([readFileSync(inputPath)]), basename(inputPath));
+  const res = await fetch("https://api.elevenlabs.io/v1/speech-to-text", {
+    method: "POST",
+    headers: { "xi-api-key": apiKey },
+    body: form,
+    signal: AbortSignal.timeout(1_800_000),
+  });
+  const body = await res.text();
+  if (!res.ok) throw new Error(`ElevenLabs HTTP ${res.status}: ${body.slice(0, 500)}`);
+  const data = JSON.parse(body);
+  const words = (Array.isArray(data?.words) ? data.words : [])
+    .filter((w) => (w.type ?? "word") === "word" && typeof w.text === "string" && w.text.trim())
+    .map((w) => ({ text: w.text.trim(), start: w.start, end: w.end ?? w.start }));
+  atomicWrite(outPath, JSON.stringify({ text: (data?.text ?? "").trim(), words }, null, 2));
+  report("elevenlabs", words.length);
+}
+
 // whisper.cpp via the hyperframes CLI (fetched/built on first use — see
 // SKILL.md): writes transcript.json into --dir; relocate to --out.
 function runWhisper() {
@@ -155,14 +188,14 @@ function runWhisper() {
 }
 
 try {
-  const parakeetBin = resolveParakeet();
+  const forced = ["elevenlabs", "parakeet", "whisper"].includes(args.engine) ? args.engine : null;
+  const parakeetBin = forced === "elevenlabs" ? null : resolveParakeet();
   const engine =
-    args.engine === "parakeet" || args.engine === "whisper"
-      ? args.engine
-      : parakeetBin
-        ? "parakeet"
-        : "whisper";
-  if (engine === "parakeet") {
+    forced ??
+    (process.env.ELEVENLABS_API_KEY?.trim() ? "elevenlabs" : parakeetBin ? "parakeet" : "whisper");
+  if (engine === "elevenlabs") {
+    await runElevenLabs();
+  } else if (engine === "parakeet") {
     if (!parakeetBin) {
       throw new Error(
         "parakeet-mlx not found (checked $HYPERFRAMES_PARAKEET, ~/.venvs/parakeet, and PATH). Install: uv venv ~/.venvs/parakeet && VIRTUAL_ENV=~/.venvs/parakeet uv pip install parakeet-mlx (or use --engine whisper)",

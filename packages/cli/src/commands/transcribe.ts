@@ -4,12 +4,17 @@ import { defineCommand } from "citty";
 import type { Example } from "./_examples.js";
 import { existsSync, writeFileSync } from "node:fs";
 import { findParakeet, transcribeWithParakeet } from "../whisper/parakeet.js";
+import { getElevenLabsApiKey, resolveElevenLabsModel } from "../whisper/elevenlabs.js";
 
 type CaptionExportFormat = "srt" | "vtt";
 
 export const examples: Example[] = [
   ["Transcribe an audio file", "hyperframes transcribe audio.mp3"],
   ["Transcribe a video file", "hyperframes transcribe video.mp4"],
+  [
+    "Force the ElevenLabs engine (needs ELEVENLABS_API_KEY)",
+    "hyperframes transcribe audio.mp3 --engine elevenlabs",
+  ],
   ["Use a larger model for better accuracy", "hyperframes transcribe audio.mp3 --model medium.en"],
   ["Set language to filter non-target speech", "hyperframes transcribe audio.mp3 --language en"],
   ["Import an existing SRT file", "hyperframes transcribe subtitles.srt"],
@@ -55,12 +60,12 @@ export default defineCommand({
     engine: {
       type: "string",
       description:
-        "ASR engine: auto (Parakeet if installed, else whisper), parakeet, or whisper. Default: auto. Parakeet is more accurate and faster; enable with `uv pip install parakeet-mlx`.",
+        "ASR engine: auto (ElevenLabs if ELEVENLABS_API_KEY is set, else Parakeet if installed, else whisper), elevenlabs, parakeet, or whisper. Default: auto. ElevenLabs (cloud, Scribe) uploads the file to the ElevenLabs API; Parakeet is local, more accurate and faster than whisper; enable with `uv pip install parakeet-mlx`.",
       alias: "e",
     },
     model: {
       type: "string",
-      description: `Whisper model (default: ${DEFAULT_MODEL}). Options: tiny.en, base.en, small.en, medium.en, large-v3`,
+      description: `Whisper model (default: ${DEFAULT_MODEL}). Options: tiny.en, base.en, small.en, medium.en, large-v3. Under --engine elevenlabs, the Scribe model id (default: ${resolveElevenLabsModel()}).`,
       alias: "m",
     },
     language: {
@@ -100,8 +105,8 @@ export default defineCommand({
         "Whisper spawn timeout in ms. Overrides the duration+model auto-scaled " +
         "default. Increase on slow CPUs (e.g. emulated arm64/x64, low-power " +
         "laptops) where whisper.cpp takes many seconds per audio second on " +
-        "medium/large models. Applies to the whisper engine only; Parakeet has " +
-        "a separate fixed timeout. Minimum 5000 (5 s). " +
+        "medium/large models. Also bounds the ElevenLabs request (default 30 min); " +
+        "Parakeet has a separate fixed timeout. Minimum 5000 (5 s). " +
         "Env: HYPERFRAMES_TRANSCRIBE_TIMEOUT_MS.",
     },
   },
@@ -281,39 +286,54 @@ async function transcribeAudio(
   },
 ): Promise<void> {
   const { transcribe } = await import("../whisper/transcribe.js");
+  const { transcribeWithElevenLabs } = await import("../whisper/elevenlabs.js");
   const { loadTranscript, patchCaptionHtml, stripBeforeOnset } =
     await import("../whisper/normalize.js");
 
-  // Engine: auto (Parakeet if installed, else whisper), or forced parakeet/whisper.
-  const engine = (opts.engine ?? "auto").toLowerCase();
-  if (engine !== "auto" && engine !== "parakeet" && engine !== "whisper") {
-    failWith(`Unknown --engine: ${opts.engine}. Use auto, parakeet, or whisper.`, !!opts.json);
-  }
-  const useParakeet = engine === "parakeet" || (engine === "auto" && !!findParakeet());
-
-  const model = opts.model ?? DEFAULT_MODEL;
-  // --model selects the whisper model only; Parakeet uses its own fixed model.
-  if (useParakeet && opts.model && !opts.json) {
-    console.error(
-      c.dim(`  Note: --model applies to the whisper engine only; ignored under Parakeet.`),
+  // Engine: auto (ElevenLabs if ELEVENLABS_API_KEY is set, else Parakeet if
+  // installed, else whisper), or forced elevenlabs/parakeet/whisper.
+  const requested = (opts.engine ?? "auto").toLowerCase();
+  if (!isEngineChoice(requested)) {
+    failWith(
+      `Unknown --engine: ${opts.engine}. Use auto, elevenlabs, parakeet, or whisper.`,
+      !!opts.json,
     );
   }
-  const label = useParakeet ? "Parakeet" : model;
+  const engine = resolveEngine(requested);
+
+  const model =
+    engine === "elevenlabs" ? resolveElevenLabsModel(opts.model) : (opts.model ?? DEFAULT_MODEL);
+  // --model selects the whisper (or ElevenLabs Scribe) model; Parakeet uses its own fixed model.
+  if (engine === "parakeet" && opts.model && !opts.json) {
+    console.error(
+      c.dim(
+        `  Note: --model applies to the whisper and elevenlabs engines only; ignored under Parakeet.`,
+      ),
+    );
+  }
+  const label =
+    engine === "parakeet" ? "Parakeet" : engine === "elevenlabs" ? `ElevenLabs ${model}` : model;
   const spin = opts.json ? null : clack.spinner();
   spin?.start(`Transcribing with ${c.accent(label)}...`);
+  const onProgress = spin ? (msg: string) => spin.message(msg) : undefined;
 
   try {
-    const result = useParakeet
-      ? transcribeWithParakeet(inputPath, dir, {
-          language: opts.language,
-          onProgress: spin ? (msg) => spin.message(msg) : undefined,
-        })
-      : await transcribe(inputPath, dir, {
-          model,
-          language: opts.language,
-          onProgress: spin ? (msg) => spin.message(msg) : undefined,
-          timeoutMs: opts.timeoutMs,
-        });
+    const result =
+      engine === "elevenlabs"
+        ? await transcribeWithElevenLabs(inputPath, dir, {
+            model,
+            language: opts.language,
+            onProgress,
+            timeoutMs: opts.timeoutMs,
+          })
+        : engine === "parakeet"
+          ? transcribeWithParakeet(inputPath, dir, { language: opts.language, onProgress })
+          : await transcribe(inputPath, dir, {
+              model,
+              language: opts.language,
+              onProgress,
+              timeoutMs: opts.timeoutMs,
+            });
 
     let { words } = loadTranscript(result.transcriptPath);
 
@@ -335,8 +355,8 @@ async function transcribeAudio(
       console.log(
         JSON.stringify({
           ok: true,
-          engine: useParakeet ? "parakeet" : "whisper",
-          model: useParakeet ? "parakeet-tdt-0.6b-v3" : model,
+          engine,
+          model: engine === "parakeet" ? "parakeet-tdt-0.6b-v3" : model,
           wordCount: words.length,
           durationSeconds: result.durationSeconds,
           speechOnsetSeconds: result.speechOnsetSeconds,
@@ -391,4 +411,18 @@ async function transcribeAudio(
     }
     failCommand();
   }
+}
+
+type EngineChoice = "auto" | "elevenlabs" | "parakeet" | "whisper";
+type Engine = Exclude<EngineChoice, "auto">;
+
+function isEngineChoice(value: string): value is EngineChoice {
+  return value === "auto" || value === "elevenlabs" || value === "parakeet" || value === "whisper";
+}
+
+/** `auto` prefers ElevenLabs when a key is configured, then local Parakeet, then whisper.cpp. */
+function resolveEngine(choice: EngineChoice): Engine {
+  if (choice !== "auto") return choice;
+  if (getElevenLabsApiKey()) return "elevenlabs";
+  return findParakeet() ? "parakeet" : "whisper";
 }

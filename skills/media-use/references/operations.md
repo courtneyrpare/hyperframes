@@ -116,10 +116,16 @@ node <SKILL_DIR>/scripts/transcribe.mjs --input talk.mp4 --out talk.transcribe.j
 npx hyperframes transcribe talk.mp4 --engine parakeet   # or --engine auto (default)
 ```
 
+**ElevenLabs first.** When `ELEVENLABS_API_KEY` is set, both `transcribe.mjs`
+and `hyperframes transcribe` default to ElevenLabs Scribe (cloud, 99 languages,
+native word timestamps; the file is uploaded to ElevenLabs). Force it with
+`--engine elevenlabs`; override the model with `HYPERFRAMES_ELEVENLABS_STT_MODEL`.
+The local engines below apply when no key is set.
+
 VERIFIED on 24GB: accurate, ~3s (cached) for 8s audio. Parakeet covers English +
 25 European languages. For other languages, or when parakeet-mlx is not
 installed, transcribe.mjs auto-falls-back to whisper.cpp (99 languages) via
-`hyperframes transcribe`. `--engine parakeet|whisper` forces one. (Cohere
+`hyperframes transcribe`. `--engine elevenlabs|parakeet|whisper` forces one. (Cohere
 Transcribe tops the leaderboard on paper but its mlx-audio quants produced
 garbage and ran 40-70x slower on a Mac in testing, so it is not wired in.)
 

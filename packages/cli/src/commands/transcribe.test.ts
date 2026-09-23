@@ -155,4 +155,47 @@ Render video. Built for agents.
       "1\n00:00:00,000 --> 00:00:01,000\nYes\n\n2\n00:00:01,000 --> 00:00:02,000\nNo\n",
     );
   });
+  it("auto picks ElevenLabs when ELEVENLABS_API_KEY is set", async () => {
+    const { dir, input } = dummyAudio();
+    dirs.push(dir);
+    vi.stubEnv("ELEVENLABS_API_KEY", "test-key");
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({ words: [{ text: "Hi", start: 0.2, end: 0.6, type: "word" }] }),
+          { status: 200 },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await transcribeCmd.run!({ args: { input, json: true, optional: false } } as never);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.unstubAllEnvs();
+    }
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(transcribeMock).not.toHaveBeenCalled();
+    const out = JSON.parse(String(log.mock.calls.at(-1)?.[0]));
+    expect(out).toMatchObject({ ok: true, engine: "elevenlabs", wordCount: 1 });
+    expect(JSON.parse(readFileSync(join(dir, "transcript.json"), "utf-8"))[0].text).toBe("Hi");
+  });
+
+  it("--engine elevenlabs without a key fails as a command error", async () => {
+    const { dir, input } = dummyAudio();
+    dirs.push(dir);
+    vi.stubEnv("ELEVENLABS_API_KEY", "");
+    try {
+      await expect(
+        transcribeCmd.run!({
+          args: { input, json: true, optional: false, engine: "elevenlabs" },
+        } as never),
+      ).rejects.toThrow();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(transcribeMock).not.toHaveBeenCalled();
+    expect(trackCommandFailure).toHaveBeenCalled();
+  });
 });

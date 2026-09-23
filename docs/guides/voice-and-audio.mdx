@@ -46,7 +46,10 @@ in the script or voice direction rather than cutting around a bad read.
 ## Transcribe recorded speech
 
 Transcription creates timed words from an audio or video file. Start with the
-automatic engine: it uses Parakeet when installed and falls back to Whisper.
+automatic engine: it uses ElevenLabs Scribe when `ELEVENLABS_API_KEY` is set
+(the file is uploaded to the ElevenLabs API), otherwise Parakeet when installed,
+and falls back to Whisper. Force one with `--engine elevenlabs|parakeet|whisper`;
+set `HYPERFRAMES_ELEVENLABS_STT_MODEL` to pick a different Scribe model.
 
 ```bash
 npx hyperframes transcribe interview.mp4

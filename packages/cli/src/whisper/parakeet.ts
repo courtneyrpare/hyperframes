@@ -103,6 +103,14 @@ export function mergeTokensToWords(parakeet: ParakeetJson): Word[] {
   return words.filter((w) => w.text.length > 0);
 }
 
+/** Write `transcript.json` (Word[]) into `dir` for a cloud/local engine that has no onset detection. */
+export function writeWordsTranscript(dir: string, words: Word[]): TranscribeResult {
+  const transcriptPath = join(dir, "transcript.json");
+  writeFileSync(transcriptPath, JSON.stringify(words, null, 2));
+  const durationSeconds = words.length > 0 ? words[words.length - 1]!.end : 0;
+  return { transcriptPath, wordCount: words.length, durationSeconds, speechOnsetSeconds: null };
+}
+
 interface ParakeetOptions {
   language?: string;
   model?: string;
@@ -140,11 +148,7 @@ export function transcribeWithParakeet(
     const produced = join(workDir, `${basename(inputPath, extname(inputPath))}.json`);
     if (!existsSync(produced)) throw new Error("Parakeet did not produce output.");
     const words = mergeTokensToWords(JSON.parse(readFileSync(produced, "utf-8")) as ParakeetJson);
-
-    const transcriptPath = join(dir, "transcript.json");
-    writeFileSync(transcriptPath, JSON.stringify(words, null, 2));
-    const durationSeconds = words.length > 0 ? words[words.length - 1]!.end : 0;
-    return { transcriptPath, wordCount: words.length, durationSeconds, speechOnsetSeconds: null };
+    return writeWordsTranscript(dir, words);
   } finally {
     rmSync(workDir, { recursive: true, force: true });
   }

@@ -263,6 +263,22 @@ async function checkWhisper(): Promise<CheckResult> {
   };
 }
 
+async function checkElevenLabsStt(): Promise<CheckResult> {
+  const { getElevenLabsApiKey, resolveElevenLabsModel } = await import("../whisper/elevenlabs.js");
+  if (getElevenLabsApiKey()) {
+    return {
+      ok: true,
+      detail: `ELEVENLABS_API_KEY set \u2014 default transcribe engine (${resolveElevenLabsModel()})`,
+    };
+  }
+  return {
+    ok: false,
+    detail:
+      "ELEVENLABS_API_KEY not set (optional \u2014 cloud transcription, used by default when set)",
+    hint: "export ELEVENLABS_API_KEY=<your key>",
+  };
+}
+
 function notInstalledDetail(base: string): string {
   const overrideRejection = describeRejectedPythonOverride();
   return overrideRejection ? `${base}. ${overrideRejection}` : base;
@@ -365,6 +381,7 @@ export default defineCommand({
     }
 
     checks.push({ name: "Environment", run: checkEnvironment });
+    checks.push({ name: "ElevenLabs STT", run: checkElevenLabsStt });
     checks.push({ name: "whisper-cpp", run: checkWhisper });
     checks.push({ name: "TTS (Kokoro)", run: checkLocalVoice });
     checks.push({ name: "BGM (MusicGen)", run: checkLocalMusic });
